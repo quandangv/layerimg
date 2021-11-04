@@ -10,12 +10,12 @@ import tempfile
 scale_exponent = 2
 layer_count = 3
 scale_method = Image.BOX
-tmp_dir = 'output/'
 debug = True
-quality = 4
+detail_level = 1
 jpeg_loss = 50
 fill_range = 8
 alpha_bpp = 2
+alpha_power = 2
 
 def upscale(img):
   with tempfile.TemporaryDirectory() as tmp_dir:
@@ -38,6 +38,7 @@ for x in range(-fill_range, fill_range+1):
     if dist <= fill_range:
       ranges[dist].append((x,y))
 
+tmp_dir = 'output/'
 def debug_save(img, name):
   if debug:
     img.save(tmp_dir + name)
@@ -66,14 +67,14 @@ with zipfile.ZipFile(output_path, mode='w') as output:
   def save_layer(index, color, alpha):
     debug_save(scale(color, scale_ratio**index, Image.BOX), f'layer{index}.png')
     debug_save(scale(alpha.convert('L'), scale_ratio**index, Image.BOX), f'layer{index}_alpha.png')
-    quality = round(100 - jpeg_loss/scale_ratio**index)
+    jpeg_quality = round(100 - jpeg_loss/scale_ratio**index)
     f = tempfile.NamedTemporaryFile()
-    def save_image(img, f, quality):
-      if quality > 95:
+    def save_image(img, f, jpeg_quality):
+      if jpeg_quality > 95:
         img.save(f, 'PNG', optimize = True)
       else:
-        img.save(f, 'JPEG', quality = quality, subsampling = 2, optimize = True)
-    save_image(img, f, quality)
+        img.save(f, 'JPEG', quality = jpeg_quality, subsampling = 2, optimize = True)
+    save_image(img, f, jpeg_quality)
     output.write(f.name, arcname=f'layer{index}')
     f.close()
     def save_1_sequence(img, bits_per_pixel):
@@ -99,25 +100,24 @@ with zipfile.ZipFile(output_path, mode='w') as output:
       byte2log = lambda v: round(log(v+1)*46)
       with upscale(downscaled) as upscaled:
         diff = ImageChops.difference(og, upscaled).convert('L').convert('F')
-      edges = og.filter(ImageFilter.FIND_EDGES).convert('L').convert('F')
-      #edges = og.filter(ImageFilter.FIND_EDGES).convert('L').filter(ImageFilter.GaussianBlur(2)).convert('F')
-      mean = 0
-      for x in range(edges.width):
-        for y in range(edges.height):
-          mean += edges.getpixel((x, y))
-      mean /= edges.width * edges.height
-      print(mean)
-      return diff.point(lambda a: a*(0.02))
+      #edges = og.filter(ImageFilter.FIND_EDGES).convert('L').convert('F')
+      #mean = 0
+      #for x in range(edges.width):
+      #  for y in range(edges.height):
+      #    mean += edges.getpixel((x, y))
+      #mean /= edges.width * edges.height
+      #print(mean)
+      return diff.point(lambda a: a*0.08)
 
     downscaled = scale(img, 1/scale_ratio)
     loss = calc_upscale_loss(img, downscaled)
 
     alpha = Image.new('L', img.size)
-    threshold = 1 / (quality * scale_ratio**layer_idx)
+    threshold = 1 / (detail_level * scale_ratio**layer_idx)
     for x in range(og_size[0]):
       for y in range(og_size[1]):
         xy = (x, y)
-        alpha.putpixel(xy, round((loss.getpixel(xy) / threshold)**2.5 *255))
+        alpha.putpixel(xy, round((loss.getpixel(xy) / threshold)**alpha_power *255))
     save_layer(layer_idx, img, alpha)
     debug_save(Image.merge('RGBA', (*img.split(), *alpha.split())), f'layer{layer_idx}_combined.png')
     img = downscaled
