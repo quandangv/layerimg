@@ -15,6 +15,7 @@ debug = True
 quality = 4
 jpeg_loss = 50
 fill_range = 8
+alpha_bpp = 2
 
 def upscale(img):
   with tempfile.TemporaryDirectory() as tmp_dir:
@@ -65,19 +66,33 @@ with zipfile.ZipFile(output_path, mode='w') as output:
   def save_layer(index, color, alpha):
     debug_save(scale(color, scale_ratio**index, Image.BOX), f'layer{index}.png')
     debug_save(scale(alpha.convert('L'), scale_ratio**index, Image.BOX), f'layer{index}_alpha.png')
+    quality = round(100 - jpeg_loss/scale_ratio**index)
     f = tempfile.NamedTemporaryFile()
     def save_image(img, f, quality):
       if quality > 95:
         img.save(f, 'PNG', optimize = True)
       else:
         img.save(f, 'JPEG', quality = quality, subsampling = 2, optimize = True)
-    save_image(img, f, round(100 - jpeg_loss/scale_ratio**index))
+    save_image(img, f, quality)
     output.write(f.name, arcname=f'layer{index}')
-    f.truncate(0)
     f.close()
-    f = tempfile.NamedTemporaryFile()
-    alpha.save(f, 'PNG', optimize = True)
-    output.write(f.name, arcname=f'layer{index}_alpha')
+    def save_1_sequence(img, bits_per_pixel):
+      sequence = [ Image.new('1', img.size) for _ in range(bits_per_pixel) ]
+      max = 2**bits_per_pixel-1
+      for x in range(img.width):
+        for y in range(img.height):
+          xy = (x, y)
+          val = round(img.getpixel(xy)/255*max)
+          for idx in range(bits_per_pixel):
+            sequence[idx].putpixel(xy, val%2)
+            val //= 2
+      for bit_idx in range(bits_per_pixel):
+        with tempfile.NamedTemporaryFile() as f:
+          sequence[bit_idx].save(f, 'PNG', optimize = True)
+          output.write(f.name, arcname=f'layer{index}_alpha{bit_idx}')
+    #alpha.save(f, 'PNG', optimize = True)
+    #output.write(f.name, arcname=f'layer{index}_alpha')
+    save_1_sequence(alpha, alpha_bpp)
     f.close()
   for layer_idx in range(layer_count):
     def calc_upscale_loss(og, downscaled):
@@ -97,45 +112,41 @@ with zipfile.ZipFile(output_path, mode='w') as output:
     downscaled = scale(img, 1/scale_ratio)
     loss = calc_upscale_loss(img, downscaled)
 
-    alpha = Image.new('1', img.size)
-    #threshold = 1 / (quality * scale_ratio**(layer_idx*2))
+    alpha = Image.new('L', img.size)
     threshold = 1 / (quality * scale_ratio**layer_idx)
-    #padded_width = img.width + fill_range*2
-    #padded_height = img.height + fill_range*2
-    #rank_map = bytearray(padded_width*padded_height)
-    #color = Image.new('RGB', img.size)
-    #for i in range(padded_width*padded_height):
-    #  if i%padded_width < img.width and i//padded_width < img.height:
-    #    rank_map[i] = fill_range
     for x in range(og_size[0]):
       for y in range(og_size[1]):
         xy = (x, y)
-        if loss.getpixel(xy) > threshold:
-          pix = img.getpixel(xy)
-          alpha.putpixel(xy, 1)
-          #for rank in range(fill_range):
-          #  for d in ranges[rank]:
-          #    dxy = (x+d[0], y+d[1])
-          #    index = dxy[0]%padded_width + dxy[1]%padded_height*padded_width
-          #    if rank_map[index] > rank:
-          #      color.putpixel(dxy, pix)
-          #      rank_map[index] = rank
-    #save_layer(layer_idx, color, alpha)
+        alpha.putpixel(xy, round((loss.getpixel(xy) / threshold)**2.5 *255))
     save_layer(layer_idx, img, alpha)
-    debug_save(Image.merge('RGBA', (*img.split(), *alpha.convert('L').split())), f'layer{layer_idx}_combined.png')
+    debug_save(Image.merge('RGBA', (*img.split(), *alpha.split())), f'layer{layer_idx}_combined.png')
     img = downscaled
     og_size = tuple(map(lambda a: ceil(a/scale_ratio), og_size))
-  save_layer(layer_count, img, Image.new('1', img.size, 1))
+  save_layer(layer_count, img, Image.new('L', img.size, 255))
 
 # CONSTRUCT
 
 with zipfile.ZipFile(output_path, mode='r') as archive, tempfile.TemporaryDirectory() as tmp_path:
   def load_layer(index):
-    archive.extract(f'layer{index}', tmp_path)
-    layer = Image.open(tmp_path + f'/layer{index}')
-    archive.extract(f'layer{index}_alpha', tmp_path)
-    alpha = Image.open(tmp_path + f'/layer{index}_alpha')
-    return Image.merge('RGBA', (*layer.split(), *alpha.convert('L').split()))
+    archive.extractall(tmp_path)
+    color = Image.open(tmp_path + f'/layer{index}')
+    def load_1_sequence(bits_per_pixel):
+      sequence = [ Image.open(tmp_path + f'/layer{index}_alpha{bit_idx}') for bit_idx in range(bits_per_pixel) ]
+      result = Image.new('L', sequence[0].size)
+      max = 2**bits_per_pixel-1
+      for x in range(result.width):
+        for y in range(result.height):
+          xy = (x, y)
+          val = 0
+          for idx in range(bits_per_pixel):
+            if sequence[idx].getpixel(xy):
+              val += 2**idx
+          result.putpixel(xy, round(val/max*255))
+      return result
+    #alpha = Image.open(tmp_path + f'/layer{index}_alpha')
+    alpha = load_1_sequence(alpha_bpp)
+    debug_save(alpha, f'extracted_alpha{index}.png')
+    return Image.merge('RGBA', (*color.split(), *alpha.split()))
 
   img = load_layer(layer_count)
   for layer_idx in reversed(range(layer_count)):
