@@ -1,4 +1,4 @@
-from PIL import Image, ImageOps, ImageChops, ImageFilter
+from PIL import Image, ImageOps, ImageChops, ImageFilter, ImageStat
 from math import *
 import zipfile
 import sys
@@ -9,7 +9,7 @@ import tempfile
 import argparse
 import platform
 
-#### COMMONS ####
+######## COMMONS ########
 
 scale_exponent = 2
 layer_count = 3
@@ -42,14 +42,14 @@ def upscale(img):
     #subprocess.run([executable, '-i', upscale_in, '-o', upscale_out])
     return Image.open(upscale_out)
 
-#### COMPRESS ####
+######## COMPRESS ########
 
 def compress(input_path, output_path):
   with Image.open(input_path) as og_img:
     # pad image to the correct size
     size_unit = scale_ratio ** layer_count
-    my_round = lambda num: ceil(num/size_unit)*size_unit
-    img = Image.new('RGB', (my_round(og_img.width), my_round(og_img.height)))
+    unit_round = lambda num: ceil(num/size_unit)*size_unit
+    img = Image.new('RGB', (unit_round(og_img.width), unit_round(og_img.height)))
     img.paste(og_img)
     for x in range(og_img.width, img.width):
       for y in range(og_img.height):
@@ -64,7 +64,6 @@ def compress(input_path, output_path):
 
   debug_save(img, 'pad.png')
 
-  print(output_path, os.path.dirname(output_path))
   os.makedirs(os.path.dirname(output_path), exist_ok=True)
   with zipfile.ZipFile(output_path, mode='w') as output:
     output.writestr('size', og_size[0].to_bytes(8, 'big') + og_size[1].to_bytes(8, 'big'))
@@ -130,7 +129,7 @@ def compress(input_path, output_path):
       og_size = tuple(map(lambda a: ceil(a/scale_ratio), og_size))
     save_layer(layer_count, img, Image.new('L', img.size, 255))
 
-#### EXTRACT ####
+######## EXTRACT ########
 
 def extract(input_path, output_path):
   with zipfile.ZipFile(input_path, mode='r') as archive, tempfile.TemporaryDirectory() as tmp_path:
@@ -163,9 +162,20 @@ def extract(input_path, output_path):
         debug_save(scale(upscaled, scale_ratio**layer_idx, Image.BOX), f'stage{layer_idx}.png')
         img = Image.alpha_composite(upscaled, mask)
     size = archive.read('size')
-    img.crop((0, 0, int.from_bytes(size[:8], 'big'), int.from_bytes(size[8:], 'big'))).save(output_path)
+    img = img.crop((0, 0, int.from_bytes(size[:8], 'big'), int.from_bytes(size[8:], 'big'))).save(output_path)
 
-#### PARSER ####
+######## COMPARE ########
+
+def compare(path1, path2):
+  with Image.open(path1) as img1, Image.open(path2) as _img2:
+    img2 = _img2.convert(img1.mode)
+    diff = ImageChops.difference(img1, img2).convert('L')
+    edge_diff = ImageChops.difference(img1.filter(ImageFilter.FIND_EDGES), img2.filter(ImageFilter.FIND_EDGES)).convert('L')
+    print('COMPARISON RESULT')
+    print('Difference: ', ImageStat.Stat(diff).mean[0])
+    print('Edge Difference: ', ImageStat.Stat(edge_diff).mean[0])
+
+######## ARG PARSER ########
 
 parser = argparse.ArgumentParser(description="Image archiver using an AI upscale algorithm.")
 parser.add_argument('--debug', action='store_true', help="Saves intermediary results for debug purpose")
@@ -182,25 +192,32 @@ simple_io.add_argument('paths', metavar='output', action='append', nargs='?', he
 parser_batch = subparsers.add_parser('batch', help="Processes a list of inputs", aliases=['b'], parents=[compress_args])
 parser_compress = subparsers.add_parser('compress', help="Compresses an image", aliases=['c'], parents=[simple_io, compress_args])
 parser_extract = subparsers.add_parser('extract', help="Extracts image from an archive", aliases=['e'], parents=[simple_io])
-parser_test = subparsers.add_parser('test', help="Compresses an image then extract to view the result", aliases=['t'], parents=[compress_args])
+parser_compare = subparsers.add_parser('compare', help="Compare 2 images on various metrics")
+parser_test = subparsers.add_parser('test', help="Compresses an image and then extracts to compare the result", aliases=['t'], parents=[compress_args])
 
 parser_compress.set_defaults(action='compress')
 parser_extract.set_defaults(action='extract')
+parser_compare.set_defaults(action='compare')
 parser_test.set_defaults(action='test')
 
 parser_test.add_argument('paths', metavar='input', action='append', help="Path to input file")
 parser_test.add_argument('paths', metavar='archive_output', action='append', nargs='?', help="Path to save the output archive. Defaults to saving next to the input")
 parser_test.add_argument('paths', metavar='image_output', action='append', nargs='?', help="Path to save the output image. Defaults to saving next to the output archive")
 
+parser_compare.add_argument('paths', metavar='image1', action='append', help="The first image to compare")
+parser_compare.add_argument('paths', metavar='image2', action='append', help='The second image to compare')
+
 parser_batch.add_argument('action', choices=['compress', 'extract', 'test'], help="Action to perform on the inputs")
 parser_batch.add_argument('batch', metavar='inputs', nargs='+', help="The list of inputs to process")
 
 args = parser.parse_args(sys.argv[1:])
-print(args)
-assert args.detail_level > 0, f"Invalid detail_level: {args.detail_level}"
-assert args.quality > 0 and args.quality <= 1, f"Invalid quality: {args.quality}"
+#print(args)
+if hasattr(args, 'detail_level'):
+  assert args.detail_level > 0, f"Invalid detail_level: {args.detail_level}"
+if hasattr(args, 'quality'):
+  assert args.quality > 0 and args.quality <= 1, f"Invalid quality: {args.quality}"
 
-#### MAIN ####
+######## MAIN ########
 
 def replace_ext(path, new_ext):
   return os.path.splitext(path)[0] + new_ext
@@ -211,6 +228,9 @@ def action_compress(input, output=None):
 def action_extract(input, output=None):
   extract(input, output or replace_ext(input, '.png'))
 
+def action_compare(path1, path2):
+  compare(path1, path2)
+
 def action_test(input, archive_output=None, image_output=None):
   archive_output = archive_output or replace_ext(input, '.zip')
   if not image_output:
@@ -219,6 +239,8 @@ def action_test(input, archive_output=None, image_output=None):
       image_output = replace_ext(image_output, '_out.png')
   compress(input, archive_output)
   extract(archive_output, image_output)
+  print()
+  compare(input, image_output)
 
 if hasattr(args, 'batch'):
   for input in args.batch:
