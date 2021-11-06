@@ -42,6 +42,16 @@ def upscale(img):
     #subprocess.run([executable, '-i', upscale_in, '-o', upscale_out])
     return Image.open(upscale_out)
 
+def range2d(a, b=None):
+  if b:
+    for x in range(a[0], b[0]):
+      for y in range(a[1], b[1]):
+        yield (x, y)
+  else:
+    for x in range(a[0]):
+      for y in range(a[1]):
+        yield (x, y)
+
 ######## COMPRESS ########
 
 def compress(input_path, output_path):
@@ -51,15 +61,12 @@ def compress(input_path, output_path):
     unit_round = lambda num: ceil(num/size_unit)*size_unit
     img = Image.new('RGB', (unit_round(og_img.width), unit_round(og_img.height)))
     img.paste(og_img)
-    for x in range(og_img.width, img.width):
-      for y in range(og_img.height):
-        img.putpixel((x, y), og_img.getpixel((og_img.width-1, y)))
-    for y in range(og_img.height, img.height):
-      for x in range(og_img.width):
-        img.putpixel((x, y), og_img.getpixel((x, og_img.height-1)))
-    for x in range(og_img.width, img.width):
-      for y in range(og_img.height, img.height):
-        img.putpixel((x, y), og_img.getpixel((og_img.width-1, og_img.height-1)))
+    for xy in range2d((og_img.width, 0), (img.width, og_img.height)):
+      img.putpixel(xy, og_img.getpixel((og_img.width-1, xy[1])))
+    for xy in range2d((0, og_img.height), (og_img.width, img.height)):
+      img.putpixel(xy, og_img.getpixel((xy[0], og_img.height-1)))
+    for xy in range2d((og_img.width, og_img.height), (img.width, img.height)):
+      img.putpixel(xy, og_img.getpixel((og_img.width-1, og_img.height-1)))
     og_size = og_img.size
 
   debug_save(img, 'pad.png')
@@ -84,13 +91,11 @@ def compress(input_path, output_path):
       def save_1_sequence(img, bits_per_pixel):
         sequence = [ Image.new('1', img.size) for _ in range(bits_per_pixel) ]
         max = 2**bits_per_pixel-1
-        for x in range(img.width):
-          for y in range(img.height):
-            xy = (x, y)
-            val = round(img.getpixel(xy)/255*max)
-            for idx in range(bits_per_pixel):
-              sequence[idx].putpixel(xy, val%2)
-              val //= 2
+        for xy in range2d(img.size):
+          val = round(img.getpixel(xy)/255*max)
+          for idx in range(bits_per_pixel):
+            sequence[idx].putpixel(xy, val%2)
+            val //= 2
         for bit_idx in range(bits_per_pixel):
           with tempfile.NamedTemporaryFile() as f:
             sequence[bit_idx].save(f, 'PNG', optimize=True)
@@ -107,10 +112,9 @@ def compress(input_path, output_path):
         diff = diff.convert('L')
         diff_mean = 0
         edges_mean = 0
-        for x in range(edges.width):
-          for y in range(edges.height):
-            edges_mean += edges.getpixel((x, y))
-            diff_mean += diff.getpixel((x, y))
+        for xy in range2d(edges.size):
+          edges_mean += edges.getpixel(xy)
+          diff_mean += diff.getpixel(xy)
         return (diff.filter(ImageFilter.GaussianBlur(0.5)).convert('F'), 0.1*edges_mean/diff_mean)
 
       downscaled = scale(img, 1/scale_ratio)
@@ -119,10 +123,8 @@ def compress(input_path, output_path):
       alpha = Image.new('L', img.size)
       #threshold = 1 / (args.detail_level * scale_ratio**(layer_idx*2))
       threshold = 1 / (loss_scalar * args.detail_level * scale_ratio**layer_idx)
-      for x in range(og_size[0]):
-        for y in range(og_size[1]):
-          xy = (x, y)
-          alpha.putpixel(xy, round((loss.getpixel(xy) / threshold)**alpha_power *255))
+      for xy in range2d(og_size):
+        alpha.putpixel(xy, round((loss.getpixel(xy) / threshold)**alpha_power *255))
       save_layer(layer_idx, img, alpha)
       debug_save(scale(Image.merge('RGBA', (*img.split(), *alpha.split())), scale_ratio**layer_idx, Image.BOX), f'layer{layer_idx}_combined.png')
       img = downscaled
@@ -140,14 +142,12 @@ def extract(input_path, output_path):
         sequence = [ Image.open(tmp_path + f'/layer{index}_alpha{bit_idx}') for bit_idx in range(bits_per_pixel) ]
         result = Image.new('L', sequence[0].size)
         max = 2**bits_per_pixel-1
-        for x in range(result.width):
-          for y in range(result.height):
-            xy = (x, y)
-            val = 0
-            for idx in range(bits_per_pixel):
-              if sequence[idx].getpixel(xy):
-                val += 2**idx
-            result.putpixel(xy, round(val/max*255))
+        for xy in range2d(result.size):
+          val = 0
+          for idx in range(bits_per_pixel):
+            if sequence[idx].getpixel(xy):
+              val += 2**idx
+          result.putpixel(xy, round(val/max*255))
         return result
       #alpha = Image.open(tmp_path + f'/layer{index}_alpha')
       alpha = load_1_sequence(alpha_bpp)
