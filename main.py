@@ -1,6 +1,5 @@
 from PIL import Image, ImageOps, ImageChops, ImageFilter
 from math import *
-from array import *
 import zipfile
 import sys
 import os
@@ -8,41 +7,7 @@ import operator
 import subprocess
 import tempfile
 import argparse
-
-#### PARSER ####
-
-compress_args = argparse.ArgumentParser(add_help=False)
-compress_args.add_argument('--detail-level', '-d', type=float, default=1, help="The level of detail in the image archive. Must be positive, default is 1")
-compress_args.add_argument('--quality', '-q', type=float, default=0.7, help="The compression quality (from 0 to 1) of the image archive")
-
-simple_io = argparse.ArgumentParser(add_help=False)
-simple_io.add_argument('paths', metavar='input', action='append', help="Path to input file")
-simple_io.add_argument('paths', metavar='output', action='append', nargs='?', help='Path to save the output file. Defaults to saving next to the input')
-
-parser = argparse.ArgumentParser(description="Image archiver using an AI upscale algorithm.")
-parser.add_argument('--debug', action='store_true', help="Saves intermediary results for debug purpose")
-subparsers = parser.add_subparsers(title='actions', description="Specifies an action to do", required=True, dest='action')
-
-parser_batch = subparsers.add_parser('batch', help="Processes a list of inputs", aliases=['b'], parents=[compress_args])
-parser_compress = subparsers.add_parser('compress', help="Compresses an image", aliases=['c'], parents=[simple_io, compress_args])
-parser_extract = subparsers.add_parser('extract', help="Extracts image from an archive", aliases=['e'], parents=[simple_io])
-parser_test = subparsers.add_parser('test', help="Compresses an image then extract to view the result", aliases=['t'], parents=[compress_args])
-
-parser_compress.set_defaults(action='compress')
-parser_extract.set_defaults(action='extract')
-parser_test.set_defaults(action='test')
-
-parser_test.add_argument('paths', metavar='input', action='append', help="Path to input file")
-parser_test.add_argument('paths', metavar='archive_output', action='append', nargs='?', help="Path to save the output archive. Defaults to saving next to the input")
-parser_test.add_argument('paths', metavar='image_output', action='append', nargs='?', help="Path to save the output image. Defaults to saving next to the output archive")
-
-parser_batch.add_argument('action', choices=['compress', 'extract', 'test'], help="Action to perform on the inputs")
-parser_batch.add_argument('batch', metavar='inputs', nargs='+', help="The list of inputs to process")
-
-args = parser.parse_args(sys.argv[1:])
-print(args)
-assert args.detail_level > 0, f"Invalid detail_level: {args.detail_level}"
-assert args.quality > 0 and args.quality <= 1, f"Invalid quality: {args.quality}"
+import platform
 
 #### COMMONS ####
 
@@ -65,8 +30,16 @@ def upscale(img):
     upscale_in = tmp_dir + '/upscale_in.png'
     upscale_out = tmp_dir + '/upscale_out.png'
     img.save(upscale_in)
-    #subprocess.run(['./ersgan/realesrgan-ncnn-vulkan', '-n', 'realesrgan-x4plus-anime', '-i', upscale_in, '-o', upscale_out])
-    subprocess.run(['./ersgan/realesrgan-ncnn-vulkan', '-i', upscale_in, '-o', upscale_out])
+    platform_system = platform.system()
+    if platform_system == 'Linux':
+      executable = './ersgan/realesrgan-ncnn-vulkan-linux'
+    elif platform_system == 'Windows':
+      executable = 'ersgan\\realesrgan-ncnn-vulkan-windows.exe'
+    elif platform_system == 'Darwin':
+      executable = './ersgan/realesrgan-ncnn-vulkan-macos'
+    else: raise OSError('Unsupported OS')
+    subprocess.run([executable, '-n', 'realesrgan-x4plus-anime', '-i', upscale_in, '-o', upscale_out])
+    #subprocess.run([executable, '-i', upscale_in, '-o', upscale_out])
     return Image.open(upscale_out)
 
 #### COMPRESS ####
@@ -91,8 +64,10 @@ def compress(input_path, output_path):
 
   debug_save(img, 'pad.png')
 
+  print(output_path, os.path.dirname(output_path))
   os.makedirs(os.path.dirname(output_path), exist_ok=True)
   with zipfile.ZipFile(output_path, mode='w') as output:
+    output.writestr('size', og_size[0].to_bytes(8, 'big') + og_size[1].to_bytes(8, 'big'))
     jpeg_loss = 100 - args.quality*100
     def save_layer(index, color, alpha):
       debug_save(scale(color, scale_ratio**index, Image.BOX), f'layer{index}.png')
@@ -128,27 +103,29 @@ def compress(input_path, output_path):
     for layer_idx in range(layer_count):
       def calc_upscale_loss(og, downscaled):
         with upscale(downscaled) as upscaled:
-          diff = ImageChops.difference(og, upscaled).convert('L').convert('F')
-        #edges = og.filter(ImageFilter.FIND_EDGES).convert('L').convert('F')
-        #mean = 0
-        #for x in range(edges.width):
-        #  for y in range(edges.height):
-        #    mean += edges.getpixel((x, y))
-        #mean /= edges.width * edges.height
-        #print(mean)
-        return diff.point(lambda a: a*0.08)
+          diff = ImageChops.difference(og, upscaled)
+        edges = diff.filter(ImageFilter.FIND_EDGES).convert('L')
+        diff = diff.convert('L')
+        diff_mean = 0
+        edges_mean = 0
+        for x in range(edges.width):
+          for y in range(edges.height):
+            edges_mean += edges.getpixel((x, y))
+            diff_mean += diff.getpixel((x, y))
+        return (diff.filter(ImageFilter.GaussianBlur(0.5)).convert('F'), 0.1*edges_mean/diff_mean)
 
       downscaled = scale(img, 1/scale_ratio)
-      loss = calc_upscale_loss(img, downscaled)
+      loss, loss_scalar = calc_upscale_loss(img, downscaled)
 
       alpha = Image.new('L', img.size)
-      threshold = 1 / (args.detail_level * scale_ratio**layer_idx)
+      #threshold = 1 / (args.detail_level * scale_ratio**(layer_idx*2))
+      threshold = 1 / (loss_scalar * args.detail_level * scale_ratio**layer_idx)
       for x in range(og_size[0]):
         for y in range(og_size[1]):
           xy = (x, y)
           alpha.putpixel(xy, round((loss.getpixel(xy) / threshold)**alpha_power *255))
       save_layer(layer_idx, img, alpha)
-      debug_save(Image.merge('RGBA', (*img.split(), *alpha.split())), f'layer{layer_idx}_combined.png')
+      debug_save(scale(Image.merge('RGBA', (*img.split(), *alpha.split())), scale_ratio**layer_idx, Image.BOX), f'layer{layer_idx}_combined.png')
       img = downscaled
       og_size = tuple(map(lambda a: ceil(a/scale_ratio), og_size))
     save_layer(layer_count, img, Image.new('L', img.size, 255))
@@ -181,10 +158,47 @@ def extract(input_path, output_path):
     img = load_layer(layer_count)
     for layer_idx in reversed(range(layer_count)):
       mask = load_layer(layer_idx)
-      debug_save(scale(img, scale_ratio**(layer_idx+1), Image.BOX), f'stage{layer_idx}.png')
+      #debug_save(scale(img, scale_ratio**(layer_idx+1), Image.BOX), f'stage{layer_idx}.png')
       with upscale(img) as upscaled:
+        debug_save(scale(upscaled, scale_ratio**layer_idx, Image.BOX), f'stage{layer_idx}.png')
         img = Image.alpha_composite(upscaled, mask)
-    img.save(output_path)
+    size = archive.read('size')
+    img.crop((0, 0, int.from_bytes(size[:8], 'big'), int.from_bytes(size[8:], 'big'))).save(output_path)
+
+#### PARSER ####
+
+parser = argparse.ArgumentParser(description="Image archiver using an AI upscale algorithm.")
+parser.add_argument('--debug', action='store_true', help="Saves intermediary results for debug purpose")
+subparsers = parser.add_subparsers(title='actions', description="Specifies an action to do", required=True, dest='action')
+
+compress_args = argparse.ArgumentParser(add_help=False)
+compress_args.add_argument('--detail-level', '-d', type=float, default=1, help="The level of detail in the image archive. Must be positive, default is 1")
+compress_args.add_argument('--quality', '-q', type=float, default=0.7, help="The compression quality (from 0 to 1) of the image archive")
+
+simple_io = argparse.ArgumentParser(add_help=False)
+simple_io.add_argument('paths', metavar='input', action='append', help="Path to input file")
+simple_io.add_argument('paths', metavar='output', action='append', nargs='?', help='Path to save the output file. Defaults to saving next to the input')
+
+parser_batch = subparsers.add_parser('batch', help="Processes a list of inputs", aliases=['b'], parents=[compress_args])
+parser_compress = subparsers.add_parser('compress', help="Compresses an image", aliases=['c'], parents=[simple_io, compress_args])
+parser_extract = subparsers.add_parser('extract', help="Extracts image from an archive", aliases=['e'], parents=[simple_io])
+parser_test = subparsers.add_parser('test', help="Compresses an image then extract to view the result", aliases=['t'], parents=[compress_args])
+
+parser_compress.set_defaults(action='compress')
+parser_extract.set_defaults(action='extract')
+parser_test.set_defaults(action='test')
+
+parser_test.add_argument('paths', metavar='input', action='append', help="Path to input file")
+parser_test.add_argument('paths', metavar='archive_output', action='append', nargs='?', help="Path to save the output archive. Defaults to saving next to the input")
+parser_test.add_argument('paths', metavar='image_output', action='append', nargs='?', help="Path to save the output image. Defaults to saving next to the output archive")
+
+parser_batch.add_argument('action', choices=['compress', 'extract', 'test'], help="Action to perform on the inputs")
+parser_batch.add_argument('batch', metavar='inputs', nargs='+', help="The list of inputs to process")
+
+args = parser.parse_args(sys.argv[1:])
+print(args)
+assert args.detail_level > 0, f"Invalid detail_level: {args.detail_level}"
+assert args.quality > 0 and args.quality <= 1, f"Invalid quality: {args.quality}"
 
 #### MAIN ####
 
@@ -206,7 +220,7 @@ def action_test(input, archive_output=None, image_output=None):
   compress(input, archive_output)
   extract(archive_output, image_output)
 
-if args.batch:
+if hasattr(args, 'batch'):
   for input in args.batch:
     globals()['action_' + args.action](input)
 else:
