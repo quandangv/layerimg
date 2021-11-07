@@ -13,7 +13,7 @@ import platform
 
 scale_exponent = 2
 layer_count = 3
-scale_method = Image.BOX
+scale_method = Image.LANCZOS
 alpha_bpp = 2
 alpha_power = 2
 
@@ -25,7 +25,7 @@ def debug_save(img, name):
   if args.debug:
     img.save(debug_dir + name)
 
-def upscale(img):
+def upscale(img, layer_idx):
   with tempfile.TemporaryDirectory() as tmp_dir:
     upscale_in = tmp_dir + '/upscale_in.png'
     upscale_out = tmp_dir + '/upscale_out.png'
@@ -40,7 +40,25 @@ def upscale(img):
     else: raise OSError('Unsupported OS')
     subprocess.run([executable, '-n', 'realesrgan-x4plus-anime', '-i', upscale_in, '-o', upscale_out])
     #subprocess.run([executable, '-i', upscale_in, '-o', upscale_out])
-    return Image.open(upscale_out)
+    with Image.open(upscale_out) as og_upscale:
+      upscale = og_upscale.copy()
+    diff = [ Image.new('F', img.size) for _ in img.getbands() ]
+    for xy in range2d(img.size):
+      base_pix = img.getpixel(xy)
+      topleft = [n*scale_ratio for n in xy]
+      botright = [n+scale_ratio for n in topleft]
+      actual_pix = [ 0 for _ in base_pix ]
+      for upxy in range2d(topleft, botright):
+        actual_pix = list(map(lambda a, b: a+b, actual_pix, upscale.getpixel(upxy)))
+      actual_pix = [ n/scale_ratio**2 for n in actual_pix ]
+      for idx in range(len(diff)):
+        diff[idx].putpixel(xy, base_pix[idx] - actual_pix[idx])
+    diff = [ scale(diff_band, scale_ratio) for diff_band in diff ]
+    for xy in range2d(upscale.size):
+      upscale.putpixel(xy, tuple(round(val + diff[i].getpixel(xy)) for i, val in enumerate(upscale.getpixel(xy))))
+    diff = [ Image.eval(diff_band, lambda a: a+128).convert('L') for diff_band in diff ]
+    debug_save(Image.merge('RGB', diff[:3]), f'diff{layer_idx}.png')
+    return upscale
 
 def range2d(a, b=None):
   if b:
@@ -78,10 +96,11 @@ def compress(input_path, output_path):
     def save_layer(index, color, alpha):
       debug_save(scale(color, scale_ratio**index, Image.BOX), f'layer{index}.png')
       debug_save(scale(alpha.convert('L'), scale_ratio**index, Image.BOX), f'layer{index}_alpha.png')
-      jpeg_quality = round(100 - jpeg_loss/scale_ratio**index)
+      jpeg_quality = round(100 - jpeg_loss/scale_ratio**(index*2))
+      print(jpeg_quality)
       f = tempfile.NamedTemporaryFile()
       def save_image(img, f, jpeg_quality):
-        if jpeg_quality > 95:
+        if jpeg_quality > 98:
           img.save(f, 'PNG', optimize = True)
         else:
           img.save(f, 'JPEG', quality=jpeg_quality, subsampling=2, optimize=True)
@@ -106,8 +125,7 @@ def compress(input_path, output_path):
       f.close()
     for layer_idx in range(layer_count):
       def calc_upscale_loss(og, downscaled):
-        with upscale(downscaled) as upscaled:
-          diff = ImageChops.difference(og, upscaled)
+        diff = ImageChops.difference(og, upscale(downscaled, layer_idx))
         edges = diff.filter(ImageFilter.FIND_EDGES).convert('L')
         diff = diff.convert('L')
         diff_mean = 0
@@ -151,16 +169,15 @@ def extract(input_path, output_path):
         return result
       #alpha = Image.open(tmp_path + f'/layer{index}_alpha')
       alpha = load_1_sequence(alpha_bpp)
-      debug_save(alpha, f'extracted_alpha{index}.png')
       return Image.merge('RGBA', (*color.split(), *alpha.split()))
 
     img = load_layer(layer_count)
     for layer_idx in reversed(range(layer_count)):
       mask = load_layer(layer_idx)
       #debug_save(scale(img, scale_ratio**(layer_idx+1), Image.BOX), f'stage{layer_idx}.png')
-      with upscale(img) as upscaled:
-        debug_save(scale(upscaled, scale_ratio**layer_idx, Image.BOX), f'stage{layer_idx}.png')
-        img = Image.alpha_composite(upscaled, mask)
+      upscaled = upscale(img, 10+layer_idx)
+      debug_save(scale(upscaled, scale_ratio**layer_idx, Image.BOX), f'stage{layer_idx}.png')
+      img = Image.alpha_composite(upscaled, mask)
     size = archive.read('size')
     img = img.crop((0, 0, int.from_bytes(size[:8], 'big'), int.from_bytes(size[8:], 'big'))).save(output_path)
 
