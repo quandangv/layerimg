@@ -42,22 +42,23 @@ def upscale(img, layer_idx):
     #subprocess.run([executable, '-i', upscale_in, '-o', upscale_out])
     with Image.open(upscale_out) as og_upscale:
       upscale = og_upscale.copy()
-    diff = [ Image.new('F', img.size) for _ in img.getbands() ]
-    for xy in range2d(img.size):
-      base_pix = img.getpixel(xy)
-      topleft = [n*scale_ratio for n in xy]
-      botright = [n+scale_ratio for n in topleft]
-      actual_pix = [ 0 for _ in base_pix ]
-      for upxy in range2d(topleft, botright):
-        actual_pix = list(map(lambda a, b: a+b, actual_pix, upscale.getpixel(upxy)))
-      actual_pix = [ n/scale_ratio**2 for n in actual_pix ]
-      for idx in range(len(diff)):
-        diff[idx].putpixel(xy, base_pix[idx] - actual_pix[idx])
-    diff = [ scale(diff_band, scale_ratio) for diff_band in diff ]
-    for xy in range2d(upscale.size):
-      upscale.putpixel(xy, tuple(round(val + diff[i].getpixel(xy)) for i, val in enumerate(upscale.getpixel(xy))))
-    diff = [ Image.eval(diff_band, lambda a: a+128).convert('L') for diff_band in diff ]
-    debug_save(Image.merge('RGB', diff[:3]), f'diff{layer_idx}.png')
+    # Color Correction
+    #diff = [ Image.new('F', img.size) for _ in img.getbands() ]
+    #for xy in range2d(img.size):
+    #  base_pix = img.getpixel(xy)
+    #  topleft = [n*scale_ratio for n in xy]
+    #  botright = [n+scale_ratio for n in topleft]
+    #  actual_pix = [ 0 for _ in base_pix ]
+    #  for upxy in range2d(topleft, botright):
+    #    actual_pix = list(map(lambda a, b: a+b, actual_pix, upscale.getpixel(upxy)))
+    #  actual_pix = [ n/scale_ratio**2 for n in actual_pix ]
+    #  for idx in range(len(diff)):
+    #    diff[idx].putpixel(xy, base_pix[idx] - actual_pix[idx])
+    #diff = [ scale(diff_band, scale_ratio) for diff_band in diff ]
+    #for xy in range2d(upscale.size):
+    #  upscale.putpixel(xy, tuple(round(val + diff[i].getpixel(xy)) for i, val in enumerate(upscale.getpixel(xy))))
+    #diff = [ Image.eval(diff_band, lambda a: a+128).convert('L') for diff_band in diff ]
+    #debug_save(Image.merge('RGB', diff[:3]), f'diff{layer_idx}.png')
     return upscale
 
 def range2d(a, b=None):
@@ -73,6 +74,7 @@ def range2d(a, b=None):
 ######## COMPRESS ########
 
 def compress(input_path, output_path):
+  detail_level = args.detail_level * 16**args.quality/16
   with Image.open(input_path) as og_img:
     # pad image to the correct size
     size_unit = scale_ratio ** layer_count
@@ -96,8 +98,7 @@ def compress(input_path, output_path):
     def save_layer(index, color, alpha):
       debug_save(scale(color, scale_ratio**index, Image.BOX), f'layer{index}.png')
       debug_save(scale(alpha.convert('L'), scale_ratio**index, Image.BOX), f'layer{index}_alpha.png')
-      jpeg_quality = round(100 - jpeg_loss/scale_ratio**(index*2))
-      print(jpeg_quality)
+      jpeg_quality = round(100 - jpeg_loss/scale_ratio**(index*args.quality_gain))
       f = tempfile.NamedTemporaryFile()
       def save_image(img, f, jpeg_quality):
         if jpeg_quality > 98:
@@ -140,7 +141,7 @@ def compress(input_path, output_path):
 
       alpha = Image.new('L', img.size)
       #threshold = 1 / (args.detail_level * scale_ratio**(layer_idx*2))
-      threshold = 1 / (loss_scalar * args.detail_level * scale_ratio**layer_idx)
+      threshold = 1 / (loss_scalar * detail_level * scale_ratio**layer_idx)
       for xy in range2d(og_size):
         alpha.putpixel(xy, round((loss.getpixel(xy) / threshold)**alpha_power *255))
       save_layer(layer_idx, img, alpha)
@@ -192,15 +193,44 @@ def compare(path1, path2):
     print('Difference: ', ImageStat.Stat(diff).mean[0])
     print('Edge Difference: ', ImageStat.Stat(edge_diff).mean[0])
 
+def create_jpeg(input_path, output_path, target_size, bias=0.2, tolerance=2048):
+  pos_bias, neg_bias = (1, bias) if bias > 0 else (bias, 1)
+  def distance(a, b):
+    r = a-b
+    return -r*neg_bias if r < 0 else r*pos_bias
+  min, max = 0, 100
+  with Image.open(input_path) as og_img:
+    img = og_img.convert('RGB')
+    best = (None, target_size)
+    while True:
+      quality = round((min+max)/2)
+      img.save(output_path, 'JPEG', quality=quality, optimize=True)
+      size = os.path.getsize(output_path)
+      diff = distance(target_size, size)
+      if diff < tolerance:
+        return True
+      if diff < best[1]:
+        best = (quality,  diff)
+      if target_size > size:
+        min = quality
+      else:
+        max = quality
+      if max - min == 1:
+        print(best)
+        img.save(output_path, 'JPEG', quality=best[0], optimize=True)
+        return False
+
 ######## ARG PARSER ########
 
 parser = argparse.ArgumentParser(description="Image archiver using an AI upscale algorithm.")
 parser.add_argument('--debug', action='store_true', help="Saves intermediary results for debug purpose")
 subparsers = parser.add_subparsers(title='actions', description="Specifies an action to do", required=True, dest='action')
 
+
 compress_args = argparse.ArgumentParser(add_help=False)
 compress_args.add_argument('--detail-level', '-d', type=float, default=1, help="The level of detail in the image archive. Must be positive, default is 1")
 compress_args.add_argument('--quality', '-q', type=float, default=0.7, help="The compression quality (from 0 to 1) of the image archive")
+compress_args.add_argument('--quality-gain', '--gain', type=float, default=3, help="The compression quality gain when we move to the larger layers. Must be positive, default is 2")
 
 simple_io = argparse.ArgumentParser(add_help=False)
 simple_io.add_argument('paths', metavar='input', action='append', help="Path to input file")
@@ -220,6 +250,7 @@ parser_test.set_defaults(action='test')
 parser_test.add_argument('paths', metavar='input', action='append', help="Path to input file")
 parser_test.add_argument('paths', metavar='archive_output', action='append', nargs='?', help="Path to save the output archive. Defaults to saving next to the input")
 parser_test.add_argument('paths', metavar='image_output', action='append', nargs='?', help="Path to save the output image. Defaults to saving next to the output archive")
+parser_test.add_argument('--create-jpeg', action='store_true', help="Try to create a JPEG version of the input image with the size similar to the archive output to compare")
 
 parser_compare.add_argument('paths', metavar='image1', action='append', help="The first image to compare")
 parser_compare.add_argument('paths', metavar='image2', action='append', help='The second image to compare')
@@ -227,12 +258,16 @@ parser_compare.add_argument('paths', metavar='image2', action='append', help='Th
 parser_batch.add_argument('action', choices=['compress', 'extract', 'test'], help="Action to perform on the inputs")
 parser_batch.add_argument('batch', metavar='inputs', nargs='+', help="The list of inputs to process")
 
-args = parser.parse_args(sys.argv[1:])
-#print(args)
-if hasattr(args, 'detail_level'):
-  assert args.detail_level > 0, f"Invalid detail_level: {args.detail_level}"
-if hasattr(args, 'quality'):
-  assert args.quality > 0 and args.quality <= 1, f"Invalid quality: {args.quality}"
+def parse_args():
+  global args
+  args = parser.parse_args(sys.argv[1:])
+  #print(args)
+  if hasattr(args, 'detail_level'):
+    assert args.detail_level > 0, f"Invalid detail_level: {args.detail_level}"
+  if hasattr(args, 'quality'):
+    assert args.quality > 0 and args.quality <= 1, f"Invalid quality: {args.quality}"
+  if hasattr(args, 'quality_gain'):
+    assert args.quality_gain > 0 , f"Invalid quality_gain: {args.quality}"
 
 ######## MAIN ########
 
@@ -257,10 +292,19 @@ def action_test(input, archive_output=None, image_output=None):
   compress(input, archive_output)
   extract(archive_output, image_output)
   print()
-  compare(input, image_output)
+  action_compare(input, image_output)
+  if hasattr(args, 'create_jpeg'):
+    jpeg_output = replace_ext(input, '.jpg')
+    if jpeg_output == input:
+      jpeg_output = replace_ext(input, '_out.jpg')
+    create_jpeg(input, jpeg_output, os.path.getsize(archive_output))
 
-if hasattr(args, 'batch'):
-  for input in args.batch:
-    globals()['action_' + args.action](input)
-else:
-  globals()['action_' + args.action](*args.paths)
+def main():
+  parse_args()
+  if hasattr(args, 'batch'):
+    for input in args.batch:
+      globals()['action_' + args.action](input)
+  else:
+    globals()['action_' + args.action](*args.paths)
+if  __name__ =='__main__':
+  main()
