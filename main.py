@@ -1,4 +1,4 @@
-from PIL import Image, ImageOps, ImageChops, ImageFilter, ImageStat
+from PIL import Image, ImageOps, ImageChops, ImageFilter, ImageStat, ImageCms
 from math import *
 import zipfile
 import sys
@@ -43,22 +43,22 @@ def upscale(img, layer_idx):
     with Image.open(upscale_out) as og_upscale:
       upscale = og_upscale.copy()
     # Color Correction
-    #diff = [ Image.new('F', img.size) for _ in img.getbands() ]
-    #for xy in range2d(img.size):
-    #  base_pix = img.getpixel(xy)
-    #  topleft = [n*scale_ratio for n in xy]
-    #  botright = [n+scale_ratio for n in topleft]
-    #  actual_pix = [ 0 for _ in base_pix ]
-    #  for upxy in range2d(topleft, botright):
-    #    actual_pix = list(map(lambda a, b: a+b, actual_pix, upscale.getpixel(upxy)))
-    #  actual_pix = [ n/scale_ratio**2 for n in actual_pix ]
-    #  for idx in range(len(diff)):
-    #    diff[idx].putpixel(xy, base_pix[idx] - actual_pix[idx])
-    #diff = [ scale(diff_band, scale_ratio) for diff_band in diff ]
-    #for xy in range2d(upscale.size):
-    #  upscale.putpixel(xy, tuple(round(val + diff[i].getpixel(xy)) for i, val in enumerate(upscale.getpixel(xy))))
-    #diff = [ Image.eval(diff_band, lambda a: a+128).convert('L') for diff_band in diff ]
-    #debug_save(Image.merge('RGB', diff[:3]), f'diff{layer_idx}.png')
+    diff = [ Image.new('F', img.size) for _ in img.getbands() ]
+    for xy in range2d(img.size):
+      base_pix = img.getpixel(xy)
+      topleft = [n*scale_ratio for n in xy]
+      botright = [n+scale_ratio for n in topleft]
+      actual_pix = [ 0 for _ in base_pix ]
+      for upxy in range2d(topleft, botright):
+        actual_pix = list(map(lambda a, b: a+b, actual_pix, upscale.getpixel(upxy)))
+      actual_pix = [ n/scale_ratio**2 for n in actual_pix ]
+      for idx in range(len(diff)):
+        diff[idx].putpixel(xy, base_pix[idx] - actual_pix[idx])
+    diff = [ scale(diff_band, scale_ratio).convert('L').filter(ImageFilter.GaussianBlur(6)) for diff_band in diff ]
+    for xy in range2d(upscale.size):
+      upscale.putpixel(xy, tuple(round(val + diff[i].getpixel(xy)) for i, val in enumerate(upscale.getpixel(xy))))
+    diff = [ Image.eval(diff_band, lambda a: a+128) for diff_band in diff ]
+    debug_save(Image.merge('RGB', diff[:3]), f'diff{layer_idx}.png')
     return upscale
 
 def range2d(a, b=None):
@@ -72,6 +72,10 @@ def range2d(a, b=None):
         yield (x, y)
 
 ######## COMPRESS ########
+
+lab_profile = ImageCms.createProfile('LAB')
+srgb_profile = ImageCms.createProfile('sRGB')
+rgb2lab = ImageCms.buildTransform(srgb_profile, lab_profile, 'RGB', 'LAB')
 
 def compress(input_path, output_path):
   detail_level = args.detail_level * 16**args.quality/16
@@ -126,9 +130,20 @@ def compress(input_path, output_path):
       f.close()
     for layer_idx in range(layer_count):
       def calc_upscale_loss(og, downscaled):
-        diff = ImageChops.difference(og, upscale(downscaled, layer_idx))
-        edges = diff.filter(ImageFilter.FIND_EDGES).convert('L')
-        diff = diff.convert('L')
+        #diff = ImageChops.difference(og, upscale(downscaled, layer_idx))
+        #diff = ImageChops.difference(og.convert('YCbCr'), upscale(downscaled, layer_idx).convert('YCbCr'))
+        #edges = diff.filter(ImageFilter.FIND_EDGES).convert('L')
+        #diff = diff.convert('L')
+
+        def to_L(img):
+          result = Image.new('L', img.size)
+          for xy in range2d(img.size):
+            result.putpixel(xy, round(hypot(*img.getpixel(xy))))
+          return result
+        diff = ImageChops.difference(ImageCms.applyTransform(og, rgb2lab), ImageCms.applyTransform(upscale(downscaled, layer_idx), rgb2lab))
+        edges = to_L(diff.filter(ImageFilter.FIND_EDGES))
+        diff = to_L(diff)
+
         diff_mean = 0
         edges_mean = 0
         for xy in range2d(edges.size):
@@ -228,9 +243,9 @@ subparsers = parser.add_subparsers(title='actions', description="Specifies an ac
 
 
 compress_args = argparse.ArgumentParser(add_help=False)
-compress_args.add_argument('--detail-level', '-d', type=float, default=1, help="The level of detail in the image archive. Must be positive, default is 1")
-compress_args.add_argument('--quality', '-q', type=float, default=0.7, help="The compression quality (from 0 to 1) of the image archive")
-compress_args.add_argument('--quality-gain', '--gain', type=float, default=3, help="The compression quality gain when we move to the larger layers. Must be positive, default is 2")
+compress_args.add_argument('--detail-level', '-d', type=float, default=0.8, help="The level of detail in the image archive. Must be positive, default is 1")
+compress_args.add_argument('--quality', '-q', type=float, default=0.8, help="The compression quality (from 0 to 1) of the image archive")
+compress_args.add_argument('--quality-gain', '--gain', type=float, default=0.8, help="The compression quality gain when we move to the larger layers. Must be positive, default is 2")
 
 simple_io = argparse.ArgumentParser(add_help=False)
 simple_io.add_argument('paths', metavar='input', action='append', help="Path to input file")

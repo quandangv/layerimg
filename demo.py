@@ -44,11 +44,11 @@ def make_comparison(root, pos, path, color=(255, 255, 255), size=(100, 100), sca
 demo = [ None, None, None, None ]
 main.args = Args(True, 0.8, 0.6, 0.6, False)
 demo[0] = make_comparison('vector-noise', (350, 150), 'demo/circles.png', size=(200, 200), scale=4)
-main.args = Args(True, 0.8, 0.8, 0.8, False)
+main.args = Args(True, 0.8, 0.8, 0.6, False)
 demo[1] = make_comparison('kurzgesagt', (550, 40), 'demo/letter.png')
-main.args = Args(True, 0.8, 0.7, 0.4, False)
+main.args = Args(True, 0.8, 0.7, 0.5, False)
 demo[2] = make_comparison('landscape', (680, 80), 'demo/mountain.png', (0, 0, 0))
-main.args = Args(True, 0.8, 0.8, 1, False)
+main.args = Args(True, 0.8, 0.8, 0.6, False)
 demo[3] = make_comparison('vector', (70, 550), 'demo/sheep.png')
 
 spacing = 100
