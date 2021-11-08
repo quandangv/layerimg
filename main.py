@@ -294,9 +294,9 @@ def action_test(input, archive_output=None, image_output=None):
   print()
   action_compare(input, image_output)
   if hasattr(args, 'create_jpeg'):
-    jpeg_output = replace_ext(input, '.jpg')
+    jpeg_output = replace_ext(image_output, '.jpg')
     if jpeg_output == input:
-      jpeg_output = replace_ext(input, '_out.jpg')
+      jpeg_output = replace_ext(image_output, '_out.jpg')
     create_jpeg(input, jpeg_output, os.path.getsize(archive_output))
 
 def main():
