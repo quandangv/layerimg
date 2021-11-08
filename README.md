@@ -8,6 +8,9 @@ That's what I'm trying to do in this project, with limited success. Here are som
 
 ![JPEG comparison](demo/jpeg-comparison.png)
 
+## dependencies
+I built this project on [Python](https://www.python.org/downloads) 3.9.6 and [Pillow](https://pillow.readthedocs.io/en/stable/installation.html) 8.4.0. It should work on other versions too, please create a pull request if you have any problem.
+
 ## usage
 **`main.py`** provides the interface for you to use in a command-line, run `python main.py --help` or `python main.py <command> --help` for the full help message.
 Here are the main commands:
