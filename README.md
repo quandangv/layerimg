@@ -22,7 +22,7 @@ Here are the main commands:
 `python main.py extract output/landscape.zip output/landscape.png`
 
 - **`test`** Compresses an image and then extracts to compare the result, e.g.,  
-`python main.py test input/landscape.png output/landscape.zip output/landscape.png --create-jpeg`  
+`python main.py test input/landscape.png output/landscape.zip --create-jpeg`  
 The `--create-jpeg` switch tells `main.py` to create a JPG file of similar size to the layerimg archive to compare
 
 - **`batch`** Compresses, extracts, or tests multiple files sequentially, e.g.,  
